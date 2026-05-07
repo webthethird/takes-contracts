@@ -109,12 +109,19 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
         // Pull USDC from the staker. They must have approved this market.
         asset.safeTransferFrom(msg.sender, address(this), amount);
         // Supply to the yield source. Shares accrue to this market.
+        // Per-stake share count is intentionally ignored — settle() reads
+        // total shares via yieldSource.balanceOf(address(this)).
+        // slither-disable-next-line unused-return
         yieldSource.deposit(amount, address(this));
 
         emit Staked(msg.sender, side, amount, block.timestamp);
     }
 
     /// @inheritdoc ITakesMarket
+    /// @dev `nonReentrant` blocks any re-entry into stake/settle/claim, so
+    ///      the state writes after the redeem() external call are safe even
+    ///      against a malicious yield source. `settled` is set to true
+    ///      before the external call as a defense-in-depth.
     function settle() external nonReentrant {
         require(block.timestamp >= lockupEnd, "lockup not ended");
         require(!settled, "already settled");
@@ -122,7 +129,7 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
 
         // Redeem ALL of this market's yield-source shares back to USDC.
         uint256 sharesHeld = yieldSource.balanceOf(address(this));
-        uint256 redeemed;
+        uint256 redeemed = 0;
         if (sharesHeld > 0) {
             redeemed = yieldSource.redeem(sharesHeld, address(this), address(this));
         }
@@ -186,7 +193,7 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
         }
 
         // Yield share: only winners (or every staker if tie).
-        uint256 yieldShare;
+        uint256 yieldShare = 0;
         if (yieldPool > 0 && (isTie || pos.side == winningSide)) {
             // myUnits = amount × (lockupEnd − stakedAt)
             uint256 myUnits = uint256(pos.amount) * (lockupEnd - uint256(pos.stakedAt));
