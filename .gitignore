@@ -18,3 +18,4 @@ docs/
 # Lib (managed via forge install)
 # (We ARE committing lib/ for reproducibility — typical Foundry pattern)
 lib/
+build.log
