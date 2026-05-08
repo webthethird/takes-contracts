@@ -21,5 +21,7 @@ base = "${BASE_RPC_URL}"
 base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
 
 [etherscan]
-base = { key = "${BASESCAN_API_KEY}", chain = "base" }
-base_sepolia = { key = "${BASESCAN_API_KEY}", chain = "base-sepolia" }
+# Etherscan v2 unified API — one key works across all chains.
+# Get a key at https://etherscan.io/myapikey (not basescan.org).
+base = { key = "${BASESCAN_API_KEY}", chain = 8453, url = "https://api.etherscan.io/v2/api?chainid=8453" }
+base_sepolia = { key = "${BASESCAN_API_KEY}", chain = 84532, url = "https://api.etherscan.io/v2/api?chainid=84532" }
