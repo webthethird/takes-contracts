@@ -10,6 +10,10 @@ import { IERC20, IERC20Metadata } from "openzeppelin-contracts/token/ERC20/exten
 ///         (raises totalAssets without minting shares → price-per-share up).
 ///         Losses are simulated by burning underlying from the vault.
 contract MockYieldVault is ERC4626 {
+    /// @notice When true, redeem reverts. Used to simulate a broken /
+    ///         deprecated / paused vault for the escrow-failure test path.
+    bool public redeemBlocked;
+
     constructor(IERC20 _underlying)
         ERC20("Mock Yield Vault", "yvUSDC")
         ERC4626(_underlying)
@@ -28,5 +32,19 @@ contract MockYieldVault is ERC4626 {
         // ERC20 doesn't have public burn; transfer to a black hole address
         IERC20 underlying = IERC20(asset());
         underlying.transfer(address(0xdead), amount);
+    }
+
+    /// @notice Test helper: toggle whether redeem reverts.
+    function setRedeemBlocked(bool blocked) external {
+        redeemBlocked = blocked;
+    }
+
+    function redeem(uint256 shares, address receiver, address owner)
+        public
+        override
+        returns (uint256)
+    {
+        require(!redeemBlocked, "vault: redeem blocked");
+        return super.redeem(shares, receiver, owner);
     }
 }

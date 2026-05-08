@@ -27,6 +27,7 @@ interface ITakesFactory {
     );
 
     event YieldSourceUpdated(address indexed previous, address indexed current);
+    event GuardianTransferStarted(address indexed previous, address indexed pending);
     event GuardianTransferred(address indexed previous, address indexed current);
     event Paused(address indexed by);
     event Unpaused(address indexed by);
@@ -51,6 +52,7 @@ interface ITakesFactory {
     function asset() external view returns (IERC20);
     function currentYieldSource() external view returns (IERC4626);
     function guardian() external view returns (address);
+    function pendingGuardian() external view returns (address);
     function paused() external view returns (bool);
 
     /* ──────────────────────── Admin ─────────────────────────── */
@@ -59,8 +61,15 @@ interface ITakesFactory {
     ///         market deployments. Existing markets are unaffected.
     function setYieldSource(IERC4626 newSource) external;
 
-    /// @notice GUARDIAN-only. Transfer the guardian role.
+    /// @notice GUARDIAN-only. Step 1 of a 2-step transfer: nominate a new
+    ///         guardian. The pending guardian must call `acceptGuardian` to
+    ///         finalize. Calling with the zero address cancels any pending
+    ///         transfer.
     function transferGuardian(address newGuardian) external;
+
+    /// @notice Step 2 of a 2-step transfer: the pending guardian accepts the
+    ///         role, which transfers control and clears `pendingGuardian`.
+    function acceptGuardian() external;
 
     /// @notice GUARDIAN-only. Blocks new market creation. Existing markets
     ///         continue to accept stakes, settle, and pay claims — funds

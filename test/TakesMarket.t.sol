@@ -20,8 +20,8 @@ contract TakesMarketTest is Test {
     address carol = makeAddr("carol");
     address yieldFeeder = makeAddr("yieldFeeder"); // funds the mock vault's "yield"
 
-    bytes32 constant Q_HASH = keccak256("was the snap airdrop fair?");
-    string constant Q_TEXT = "Was the SNAP airdrop fair?";
+    string constant Q_TEXT = "was the snap airdrop fair?";
+    bytes32 constant Q_HASH = keccak256(bytes(Q_TEXT));
 
     uint256 constant ONE_USDC = 1e6;
 
@@ -302,5 +302,95 @@ contract TakesMarketTest is Test {
         vm.prank(bob);
         market.claim();
         assertEq(usdc.balanceOf(bob) - bBefore, 90 * ONE_USDC);
+    }
+
+    /* ─────────────────── Escrow failure (M-1) ───────────────── */
+
+    function test_escrowFailure_paysOutSharesProRata() public {
+        // Two stakers, equal principal
+        _stake(alice, ITakesMarket.Side.YES, 100 * ONE_USDC);
+        _stake(bob, ITakesMarket.Side.NO, 50 * ONE_USDC);
+
+        uint256 sharesHeldBefore = vault.balanceOf(address(market));
+        assertGt(sharesHeldBefore, 0);
+
+        // Break the vault — redeem will revert
+        vault.setRedeemBlocked(true);
+
+        vm.warp(market.lockupEnd());
+        market.settle();
+
+        // Settlement does NOT revert; instead flags escrow failure
+        assertTrue(market.settled());
+        assertTrue(market.escrowFailed());
+        assertFalse(market.impaired());
+        assertEq(market.yieldPool(), 0);
+        assertEq(market.totalRedeemed(), 0);
+        assertEq(market.sharesAtSettlement(), sharesHeldBefore);
+
+        // Each staker claims pro-rata SHARES (not USDC)
+        uint256 aliceSharesBefore = vault.balanceOf(alice);
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        market.claim();
+        // Alice has 100 / 150 of principal -> 100/150 of shares
+        uint256 expectedAliceShares = (100 * ONE_USDC * sharesHeldBefore) / (150 * ONE_USDC);
+        assertEq(vault.balanceOf(alice) - aliceSharesBefore, expectedAliceShares);
+        // No USDC paid out
+        assertEq(usdc.balanceOf(alice), aliceUsdcBefore);
+
+        uint256 bobSharesBefore = vault.balanceOf(bob);
+        vm.prank(bob);
+        market.claim();
+        uint256 expectedBobShares = (50 * ONE_USDC * sharesHeldBefore) / (150 * ONE_USDC);
+        assertEq(vault.balanceOf(bob) - bobSharesBefore, expectedBobShares);
+
+        // Now alice can recover by redeeming directly with the vault, once
+        // it's restored
+        vault.setRedeemBlocked(false);
+        uint256 aliceShares = vault.balanceOf(alice);
+        vm.prank(alice);
+        vault.redeem(aliceShares, alice, alice);
+        // Alice gets back ~100 USDC (no yield, no loss in this path)
+        assertApproxEqAbs(usdc.balanceOf(alice) - aliceUsdcBefore, 100 * ONE_USDC, 1);
+    }
+
+    /* ─────────────── Donation absorption (L-1) ────────────────── */
+
+    function test_directDonationsAbsorbedIntoYieldPool() public {
+        _stake(alice, ITakesMarket.Side.YES, 50 * ONE_USDC);
+
+        // Someone sends USDC directly to the market, bypassing stake()
+        usdc.mint(address(this), 5 * ONE_USDC);
+        usdc.transfer(address(market), 5 * ONE_USDC);
+
+        vm.warp(market.lockupEnd());
+        market.settle();
+
+        // The 5 USDC donation is now part of yieldPool (no yield was injected)
+        assertEq(market.yieldPool(), 5 * ONE_USDC);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        market.claim();
+        // Alice (sole winner) takes principal + entire yield pool incl. donation
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 55 * ONE_USDC);
+    }
+
+    /* ────────────────── Settled state reports tie + impaired (L-2/L-3) ───────── */
+
+    function test_settledState_reportsTieAndImpairedFlags() public {
+        _stake(alice, ITakesMarket.Side.YES, 50 * ONE_USDC);
+        _stake(bob, ITakesMarket.Side.NO, 50 * ONE_USDC);
+
+        // Tie + impairment combined — both flags should be set
+        vault.incurLoss(10 * ONE_USDC);
+        vm.warp(market.lockupEnd());
+        market.settle();
+
+        assertTrue(market.isTie());
+        assertTrue(market.impaired());
+        assertFalse(market.escrowFailed());
+        assertEq(market.yieldPool(), 0);
     }
 }

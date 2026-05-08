@@ -56,6 +56,15 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
     /// @notice True if redeem returned less than total principal. Implies
     ///         per-staker principal loss; yieldPool is 0 in this case.
     bool public impaired;
+    /// @notice True if the yield source's redeem call reverted at settlement.
+    ///         Claims pay out pro-rata ERC4626 shares of `yieldSource` rather
+    ///         than USDC; staker recovers via the vault directly.
+    bool public escrowFailed;
+    /// @notice Snapshot of `yieldSource.balanceOf(address(this))` at the
+    ///         moment redeem failed. Used as the denominator for share
+    ///         payouts; reading the live balance would shrink with each claim
+    ///         and starve later claimers.
+    uint256 public sharesAtSettlement;
 
     /* ──────────────────────── Construction ─────────────────────────── */
 
@@ -122,18 +131,32 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
     ///      the state writes after the redeem() external call are safe even
     ///      against a malicious yield source. `settled` is set to true
     ///      before the external call as a defense-in-depth.
+    ///
+    ///      Three settlement modes:
+    ///        - healthy: redeem returns >= principal -> yield pool > 0
+    ///        - impaired: redeem returns < principal -> pro-rata principal loss
+    ///        - escrowFailed: redeem reverts -> pro-rata share payout in claim
     function settle() external nonReentrant {
         require(block.timestamp >= lockupEnd, "lockup not ended");
         require(!settled, "already settled");
         settled = true;
 
-        // Redeem ALL of this market's yield-source shares back to USDC.
         uint256 sharesHeld = yieldSource.balanceOf(address(this));
-        uint256 redeemed = 0;
         if (sharesHeld > 0) {
-            redeemed = yieldSource.redeem(sharesHeld, address(this), address(this));
+            // try/catch: if the yield source rejects the redeem (paused,
+            // deprecated, illiquid, etc.), fall back to share-distribution
+            // mode rather than trapping principal forever. The redeem
+            // return value is intentionally ignored — we read the actual
+            // balance instead (M-2 in audit) so vault fees / lying vaults
+            // can't lead us to overpay.
+            // slither-disable-next-line unused-return
+            try yieldSource.redeem(sharesHeld, address(this), address(this)) returns (uint256) {
+                totalRedeemed = asset.balanceOf(address(this));
+            } catch {
+                escrowFailed = true;
+                sharesAtSettlement = sharesHeld;
+            }
         }
-        totalRedeemed = redeemed;
 
         uint256 totalPrincipal = yesStaked + noStaked;
 
@@ -162,17 +185,26 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
             unchecked { winningUnits = yesUnits + noUnits; }
         }
 
-        // Yield pool: redeemed > principal in the healthy case.
-        if (redeemed >= totalPrincipal) {
-            unchecked { yieldPool = redeemed - totalPrincipal; }
-        } else {
-            // Yield source impaired (lost money). All stakers share the loss
-            // pro-rata; no yield to distribute.
-            impaired = true;
-            yieldPool = 0;
+        // Determine yield pool / impairment. Skipped on escrow-failure path
+        // (no USDC moved; payouts are in shares).
+        if (!escrowFailed) {
+            if (totalRedeemed >= totalPrincipal) {
+                unchecked { yieldPool = totalRedeemed - totalPrincipal; }
+            } else {
+                impaired = true;
+                yieldPool = 0;
+            }
         }
 
-        emit Settled(winningSide, yieldPool, winningUnits, redeemed);
+        emit Settled(
+            winningSide,
+            yieldPool,
+            winningUnits,
+            totalRedeemed,
+            isTie,
+            impaired,
+            escrowFailed
+        );
     }
 
     /// @inheritdoc ITakesMarket
@@ -183,11 +215,26 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
         require(!pos.claimed, "already claimed");
         pos.claimed = true;
 
+        uint256 totalPrincipal = yesStaked + noStaked;
+
+        // Escrow-failure path: vault redeem reverted at settlement. Distribute
+        // pro-rata yield-source shares to the staker; they redeem on their
+        // own. No yield branch — there is no realized yield in this mode.
+        if (escrowFailed) {
+            // totalPrincipal > 0 because pos.amount > 0
+            uint256 sharesShare =
+                (uint256(pos.amount) * sharesAtSettlement) / totalPrincipal;
+            if (sharesShare > 0) {
+                IERC20(address(yieldSource)).safeTransfer(msg.sender, sharesShare);
+            }
+            emit Claimed(msg.sender, sharesShare, 0);
+            return;
+        }
+
         uint256 principal = uint256(pos.amount);
 
         // Pro-rata principal scaling if impaired.
         if (impaired) {
-            uint256 totalPrincipal = yesStaked + noStaked;
             // totalPrincipal > 0 because pos.amount > 0
             principal = (principal * totalRedeemed) / totalPrincipal;
         }

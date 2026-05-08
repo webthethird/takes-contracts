@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import { IERC20 } from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import { IERC4626 } from "openzeppelin-contracts/interfaces/IERC4626.sol";
+import { ReentrancyGuard } from "openzeppelin-contracts/utils/ReentrancyGuard.sol";
 
 import { ITakesFactory } from "./interfaces/ITakesFactory.sol";
 import { TakesMarket } from "./TakesMarket.sol";
@@ -13,12 +14,15 @@ import { TakesMarket } from "./TakesMarket.sol";
 ///         Markets, once deployed, are wired to whatever yield source was
 ///         current at their creation — the factory's source rotation
 ///         affects only future deployments.
-contract TakesFactory is ITakesFactory {
+contract TakesFactory is ITakesFactory, ReentrancyGuard {
     /* ────────────────────────── State ──────────────────────────────── */
 
     IERC20 public immutable asset;
     IERC4626 public currentYieldSource;
     address public guardian;
+    /// @notice Nominee for guardian role. Cleared on `acceptGuardian` or
+    ///         when current guardian calls `transferGuardian(address(0))`.
+    address public pendingGuardian;
     bool public paused;
     mapping(bytes32 => address) private _markets;
 
@@ -44,15 +48,27 @@ contract TakesFactory is ITakesFactory {
     /* ──────────────────────── User actions ─────────────────────────── */
 
     /// @inheritdoc ITakesFactory
+    /// @dev `nonReentrant` blocks a malicious yield source's `asset()`
+    ///      callback from re-entering during `new TakesMarket(...)` and
+    ///      deploying a duplicate market under the same hash.
     function getOrCreate(bytes32 questionHash, string calldata question)
         external
+        nonReentrant
         returns (address market)
     {
         market = _markets[questionHash];
         if (market != address(0)) return market;
 
         require(!paused, "paused");
+        require(questionHash != bytes32(0), "zero hash");
         require(bytes(question).length > 0, "empty question");
+        // On-chain integrity: the stored / emitted text must hash to the key.
+        // Off-chain canonicalization (whitespace, casing) is the producer's
+        // responsibility; the contract just enforces consistency.
+        require(
+            keccak256(bytes(question)) == questionHash,
+            "hash/text mismatch"
+        );
 
         TakesMarket newMarket = new TakesMarket(
             questionHash,
@@ -91,11 +107,23 @@ contract TakesFactory is ITakesFactory {
     }
 
     /// @inheritdoc ITakesFactory
+    /// @dev Zero address is allowed and intentional — it cancels any pending
+    ///      transfer.
+    // slither-disable-next-line missing-zero-check
     function transferGuardian(address newGuardian) external onlyGuardian {
-        require(newGuardian != address(0), "zero");
+        pendingGuardian = newGuardian;
+        emit GuardianTransferStarted(guardian, newGuardian);
+    }
+
+    /// @inheritdoc ITakesFactory
+    function acceptGuardian() external {
+        address pending = pendingGuardian;
+        require(pending != address(0), "no pending");
+        require(msg.sender == pending, "not pending");
         address prev = guardian;
-        guardian = newGuardian;
-        emit GuardianTransferred(prev, newGuardian);
+        guardian = pending;
+        pendingGuardian = address(0);
+        emit GuardianTransferred(prev, pending);
     }
 
     /// @inheritdoc ITakesFactory

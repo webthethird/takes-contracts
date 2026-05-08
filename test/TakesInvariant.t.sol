@@ -131,8 +131,9 @@ contract TakesInvariantTest is Test {
         usdc = new MockUSDC();
         vault = new MockYieldVault(usdc);
         TakesFactory factory = new TakesFactory(usdc, vault, address(this));
+        string memory qText = "invariant test";
         market = TakesMarket(
-            factory.getOrCreate(keccak256("invariant test"), "Invariant test")
+            factory.getOrCreate(keccak256(bytes(qText)), qText)
         );
 
         address[] memory users = new address[](5);

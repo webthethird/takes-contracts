@@ -32,7 +32,15 @@ interface ITakesMarket {
     /* ───────────────────────── Events ───────────────────────── */
 
     event Staked(address indexed staker, Side side, uint256 amount, uint256 stakedAt);
-    event Settled(Side winningSide, uint256 yieldPool, uint256 winningUnits, uint256 totalRedeemed);
+    event Settled(
+        Side winningSide,
+        uint256 yieldPool,
+        uint256 winningUnits,
+        uint256 totalRedeemed,
+        bool isTie,
+        bool impaired,
+        bool escrowFailed
+    );
     event Claimed(address indexed staker, uint256 principal, uint256 yieldShare);
 
     /* ─────────────────────── User actions ───────────────────── */
@@ -90,4 +98,10 @@ interface ITakesMarket {
     /// @notice True if the redeem at settlement returned less than total
     ///         principal. Implies pro-rata principal loss for all stakers.
     function impaired() external view returns (bool);
+
+    /// @notice True if `yieldSource.redeem` reverted at settlement. Stakers
+    ///         claim their pro-rata share of the market's ERC4626 shares
+    ///         instead of USDC; recovery via the vault is the staker's
+    ///         responsibility from there.
+    function escrowFailed() external view returns (bool);
 }
