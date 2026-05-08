@@ -33,34 +33,44 @@ contract Deploy is Script {
         address guardian = vm.envAddress("GUARDIAN");
         require(guardian != address(0), "GUARDIAN env required");
 
-        // Resolve USDC: env override or chain default
+        // Resolve USDC: env override or chain default. address(0) means unset.
         address usdc = vm.envOr("USDC", address(0));
-
-        // Resolve yield source: env override or chain default (mock on Sepolia)
-        address yieldSource = vm.envOr("YIELD_SOURCE", address(0));
-        bool deployMocks = yieldSource == address(0);
-
         if (usdc == address(0)) {
             if (block.chainid == 8453) usdc = BASE_USDC;
             else if (block.chainid == 84532) usdc = BASE_SEPOLIA_USDC;
-            else if (!deployMocks) revert("USDC env required on this chain");
-            // else: mocks branch will set USDC to a fresh MockUSDC
+            // else: leave as 0; mock branch below deploys MockUSDC.
         }
 
-        if (deployMocks && block.chainid == 8453) {
-            revert("Refusing to deploy mocks on mainnet - set YIELD_SOURCE");
+        // Resolve yield source: env override or deploy a mock on testnets.
+        address yieldSource = vm.envOr("YIELD_SOURCE", address(0));
+        bool deployMockUsdc = usdc == address(0);
+        bool deployMockVault = yieldSource == address(0);
+
+        if (deployMockVault && block.chainid == 8453) {
+            revert("Refusing to deploy mock vault on mainnet - set YIELD_SOURCE");
+        }
+        if (deployMockUsdc && block.chainid == 8453) {
+            revert("USDC env required on mainnet");
         }
 
-        vm.startBroadcast();
+        // Read deployer key — used to broadcast and to mint testnet USDC.
+        // Falls back to forge's --private-key flag if env not set.
+        uint256 deployerKey = vm.envOr("DEPLOY_PRIVATE_KEY", uint256(0));
+        if (deployerKey != 0) {
+            vm.startBroadcast(deployerKey);
+        } else {
+            vm.startBroadcast();
+        }
 
-        if (deployMocks) {
-            // Testnet path: deploy fresh MockUSDC + MockYieldVault for
-            // end-to-end testing without depending on external Morpho/etc.
+        if (deployMockUsdc) {
             MockUSDC mockUsdc = new MockUSDC();
-            MockYieldVault mockVault = new MockYieldVault(IERC20(address(mockUsdc)));
             usdc = address(mockUsdc);
-            yieldSource = address(mockVault);
             console.log("MockUSDC:        ", usdc);
+        }
+
+        if (deployMockVault) {
+            MockYieldVault mockVault = new MockYieldVault(IERC20(usdc));
+            yieldSource = address(mockVault);
             console.log("MockYieldVault:  ", yieldSource);
         }
 
