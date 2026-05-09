@@ -49,6 +49,18 @@ interface ITakesFactory {
     /* ──────────────────────── Views ─────────────────────────── */
 
     function getMarket(bytes32 questionHash) external view returns (address);
+
+    /// @notice Predicts the CREATE2 address a new market would be deployed
+    ///         to under the factory's CURRENT yield source. If a market for
+    ///         this questionHash already exists (`getMarket != 0`), use that
+    ///         address instead — it may have been deployed under a previous
+    ///         yield source and live at a different address.
+    /// @dev    Useful for batched on-chain flows that need to pre-approve
+    ///         USDC to the market in the same wallet popup as `getOrCreate`.
+    function predictMarket(bytes32 questionHash, string calldata question)
+        external
+        view
+        returns (address);
     function asset() external view returns (IERC20);
     function currentYieldSource() external view returns (IERC4626);
     function guardian() external view returns (address);

@@ -70,7 +70,11 @@ contract TakesFactory is ITakesFactory, ReentrancyGuard {
             "hash/text mismatch"
         );
 
-        TakesMarket newMarket = new TakesMarket(
+        // CREATE2 with salt = questionHash. Address is deterministic in
+        // (factory, questionHash, question, asset, currentYieldSource).
+        // The early-return above means we never hit a CREATE2 collision —
+        // a second call for the same hash returns the cached market.
+        TakesMarket newMarket = new TakesMarket{salt: questionHash}(
             questionHash,
             question,
             asset,
@@ -93,6 +97,27 @@ contract TakesFactory is ITakesFactory, ReentrancyGuard {
     /// @inheritdoc ITakesFactory
     function getMarket(bytes32 questionHash) external view returns (address) {
         return _markets[questionHash];
+    }
+
+    /// @inheritdoc ITakesFactory
+    function predictMarket(bytes32 questionHash, string calldata question)
+        external
+        view
+        returns (address)
+    {
+        bytes memory initCode = abi.encodePacked(
+            type(TakesMarket).creationCode,
+            abi.encode(questionHash, question, asset, currentYieldSource)
+        );
+        bytes32 hash = keccak256(
+            abi.encodePacked(
+                bytes1(0xff),
+                address(this),
+                questionHash,
+                keccak256(initCode)
+            )
+        );
+        return address(uint160(uint256(hash)));
     }
 
     /* ──────────────────────── Admin ────────────────────────────────── */

@@ -67,6 +67,29 @@ contract TakesFactoryTest is Test {
         factory.getOrCreate(Q1, "different question text");
     }
 
+    /* ──────────────────── CREATE2 determinism ───────────────── */
+
+    function test_predictMarket_matchesActualDeployedAddress() public {
+        address predicted = factory.predictMarket(Q1, Q1_TEXT);
+        address actual = factory.getOrCreate(Q1, Q1_TEXT);
+        assertEq(predicted, actual, "CREATE2 prediction must match deployment");
+    }
+
+    function test_predictMarket_isStableAcrossMultipleCalls() public {
+        address p1 = factory.predictMarket(Q1, Q1_TEXT);
+        address p2 = factory.predictMarket(Q1, Q1_TEXT);
+        assertEq(p1, p2);
+    }
+
+    function test_predictMarket_differsAcrossYieldSourceRotation() public {
+        // Prediction depends on currentYieldSource (it's part of the initCode).
+        address pBefore = factory.predictMarket(Q1, Q1_TEXT);
+        vm.prank(guardian);
+        factory.setYieldSource(vaultB);
+        address pAfter = factory.predictMarket(Q1, Q1_TEXT);
+        assertTrue(pBefore != pAfter, "rotating yield source should change prediction");
+    }
+
     /* ───────────────────── Yield source rotation ──────────── */
 
     function test_setYieldSource_affectsOnlyFutureMarkets() public {
