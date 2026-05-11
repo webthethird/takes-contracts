@@ -24,10 +24,10 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
     /// @notice $1000 USDC
     uint256 public constant MAX_STAKE = 1000e6;
     /// @notice Fraction of losing-side principal forfeited to the winning
-    ///         side at settlement, in basis points (1 bp = 0.01%). 500 = 5%.
+    ///         side at settlement, in basis points (1 bp = 0.01%). 1000 = 10%.
     ///         Skipped when isTie, impaired, or escrowFailed — losers
     ///         already lost or there's no winner to pay.
-    uint256 public constant LOSER_PENALTY_BPS = 500;
+    uint256 public constant LOSER_PENALTY_BPS = 1000;
     uint256 private constant BPS_DENOM = 10_000;
 
     /* ──────────────────────── Immutable state ──────────────────────── */

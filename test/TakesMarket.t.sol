@@ -97,27 +97,27 @@ contract TakesMarketTest is Test {
         market.settle();
 
         assertEq(uint8(market.winningSide()), uint8(ITakesMarket.Side.YES));
-        // Loser-side principal slashed 5% (10 USDC * 5% = 0.5 USDC) into yieldPool
-        assertEq(market.slashedFromLosers(), (10 * ONE_USDC * 500) / 10_000);
-        // yieldPool = redeemed yield (~6) + slash (0.5) = ~6.5. ERC4626's virtual-
+        // Loser-side principal slashed 10% (10 USDC * 10% = 1 USDC) into yieldPool
+        assertEq(market.slashedFromLosers(), (10 * ONE_USDC * 1000) / 10_000);
+        // yieldPool = redeemed yield (~6) + slash (1) = ~7. ERC4626's virtual-
         // offset accounting can leave a 1-wei rounding remainder in the vault.
         assertApproxEqAbs(
             market.yieldPool(),
-            6 * ONE_USDC + (10 * ONE_USDC * 500) / 10_000,
+            6 * ONE_USDC + (10 * ONE_USDC * 1000) / 10_000,
             1
         );
 
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         market.claim();
-        // Alice (winner): 50 + all of yieldPool (6.5)
+        // Alice (winner): 50 + all of yieldPool (~7)
         assertEq(usdc.balanceOf(alice) - aliceBefore, 50 * ONE_USDC + market.yieldPool());
 
         uint256 bobBefore = usdc.balanceOf(bob);
         vm.prank(bob);
         market.claim();
-        // Bob (loser): 95% of his 10 USDC principal = 9.5 USDC
-        assertEq(usdc.balanceOf(bob) - bobBefore, 9_500_000);
+        // Bob (loser): 90% of his 10 USDC principal = 9 USDC
+        assertEq(usdc.balanceOf(bob) - bobBefore, 9 * ONE_USDC);
     }
 
     function test_loserSlash_solvency_singleWinnerSingleLoser() public {
@@ -132,23 +132,23 @@ contract TakesMarketTest is Test {
         market.settle(); // no yield injected — yield pool = slash only
 
         assertEq(uint8(market.winningSide()), uint8(ITakesMarket.Side.YES));
-        // 5% of 100 = 5 USDC slashed
-        assertEq(market.slashedFromLosers(), 5 * ONE_USDC);
-        assertEq(market.yieldPool(), 5 * ONE_USDC);
+        // 10% of 100 = 10 USDC slashed
+        assertEq(market.slashedFromLosers(), 10 * ONE_USDC);
+        assertEq(market.yieldPool(), 10 * ONE_USDC);
 
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         market.claim();
-        // Alice: 100 principal + 5 slash = 105
-        assertEq(usdc.balanceOf(alice) - aliceBefore, 105 * ONE_USDC);
+        // Alice: 100 principal + 10 slash = 110
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 110 * ONE_USDC);
 
         uint256 bobBefore = usdc.balanceOf(bob);
         vm.prank(bob);
         market.claim();
-        // Bob: 95 (5% slashed)
-        assertEq(usdc.balanceOf(bob) - bobBefore, 95 * ONE_USDC);
+        // Bob: 90 (10% slashed)
+        assertEq(usdc.balanceOf(bob) - bobBefore, 90 * ONE_USDC);
 
-        // Solvency: 105 + 95 = 200 = total deposited
+        // Solvency: 110 + 90 = 200 = total deposited
         assertEq(usdc.balanceOf(address(market)), 0);
     }
 
