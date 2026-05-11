@@ -87,7 +87,7 @@ contract TakesMarketTest is Test {
         assertEq(aliceAfter - aliceBefore, 10 * ONE_USDC + market.yieldPool());
     }
 
-    function test_winnerTakesYield_loserPrincipalOnly() public {
+    function test_winnerTakesYield_andSlashedLoserPrincipal() public {
         // Alice stakes YES, Bob stakes NO — both at t=now
         _stake(alice, ITakesMarket.Side.YES, 50 * ONE_USDC);
         _stake(bob, ITakesMarket.Side.NO, 10 * ONE_USDC);
@@ -96,20 +96,79 @@ contract TakesMarketTest is Test {
         _accrueYield(6 * ONE_USDC); // 6 USDC yield on 60 USDC principal
         market.settle();
 
-        // YES has more units (more amount × same elapsed time)
         assertEq(uint8(market.winningSide()), uint8(ITakesMarket.Side.YES));
+        // Loser-side principal slashed 5% (10 USDC * 5% = 0.5 USDC) into yieldPool
+        assertEq(market.slashedFromLosers(), (10 * ONE_USDC * 500) / 10_000);
+        // yieldPool = redeemed yield (~6) + slash (0.5) = ~6.5. ERC4626's virtual-
+        // offset accounting can leave a 1-wei rounding remainder in the vault.
+        assertApproxEqAbs(
+            market.yieldPool(),
+            6 * ONE_USDC + (10 * ONE_USDC * 500) / 10_000,
+            1
+        );
 
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         market.claim();
-        // Alice (winner): 50 + all of yieldPool
+        // Alice (winner): 50 + all of yieldPool (6.5)
         assertEq(usdc.balanceOf(alice) - aliceBefore, 50 * ONE_USDC + market.yieldPool());
 
         uint256 bobBefore = usdc.balanceOf(bob);
         vm.prank(bob);
         market.claim();
-        // Bob (loser): just 10 USDC principal, no yield
-        assertEq(usdc.balanceOf(bob) - bobBefore, 10 * ONE_USDC);
+        // Bob (loser): 95% of his 10 USDC principal = 9.5 USDC
+        assertEq(usdc.balanceOf(bob) - bobBefore, 9_500_000);
+    }
+
+    function test_loserSlash_solvency_singleWinnerSingleLoser() public {
+        // Alice stakes earlier so she wins on time-weighted units (same amount,
+        // longer lock). Without the time gap this would be a tie and the slash
+        // would be skipped.
+        _stake(alice, ITakesMarket.Side.YES, 100 * ONE_USDC);
+        vm.warp(block.timestamp + 1 days);
+        _stake(bob, ITakesMarket.Side.NO, 100 * ONE_USDC);
+
+        vm.warp(market.lockupEnd());
+        market.settle(); // no yield injected — yield pool = slash only
+
+        assertEq(uint8(market.winningSide()), uint8(ITakesMarket.Side.YES));
+        // 5% of 100 = 5 USDC slashed
+        assertEq(market.slashedFromLosers(), 5 * ONE_USDC);
+        assertEq(market.yieldPool(), 5 * ONE_USDC);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        market.claim();
+        // Alice: 100 principal + 5 slash = 105
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 105 * ONE_USDC);
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        vm.prank(bob);
+        market.claim();
+        // Bob: 95 (5% slashed)
+        assertEq(usdc.balanceOf(bob) - bobBefore, 95 * ONE_USDC);
+
+        // Solvency: 105 + 95 = 200 = total deposited
+        assertEq(usdc.balanceOf(address(market)), 0);
+    }
+
+    function test_slash_skippedOnTie() public {
+        _stake(alice, ITakesMarket.Side.YES, 50 * ONE_USDC);
+        _stake(bob, ITakesMarket.Side.NO, 50 * ONE_USDC);
+        vm.warp(market.lockupEnd());
+        market.settle();
+        assertTrue(market.isTie());
+        assertEq(market.slashedFromLosers(), 0);
+    }
+
+    function test_slash_skippedWhenImpaired() public {
+        _stake(alice, ITakesMarket.Side.YES, 50 * ONE_USDC);
+        _stake(bob, ITakesMarket.Side.NO, 10 * ONE_USDC);
+        vault.incurLoss(5 * ONE_USDC);
+        vm.warp(market.lockupEnd());
+        market.settle();
+        assertTrue(market.impaired());
+        assertEq(market.slashedFromLosers(), 0);
     }
 
     /* ───────────────── Time weighting protects early stakers ─────────────── */

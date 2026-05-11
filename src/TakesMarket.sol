@@ -23,6 +23,12 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
     uint256 public constant MIN_STAKE = 1e6;
     /// @notice $1000 USDC
     uint256 public constant MAX_STAKE = 1000e6;
+    /// @notice Fraction of losing-side principal forfeited to the winning
+    ///         side at settlement, in basis points (1 bp = 0.01%). 500 = 5%.
+    ///         Skipped when isTie, impaired, or escrowFailed — losers
+    ///         already lost or there's no winner to pay.
+    uint256 public constant LOSER_PENALTY_BPS = 500;
+    uint256 private constant BPS_DENOM = 10_000;
 
     /* ──────────────────────── Immutable state ──────────────────────── */
 
@@ -65,6 +71,9 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
     ///         payouts; reading the live balance would shrink with each claim
     ///         and starve later claimers.
     uint256 public sharesAtSettlement;
+    /// @notice Total USDC slashed from losing-side principal at settlement
+    ///         and added to `yieldPool`. Zero on tie / impaired / escrowFailed.
+    uint256 public slashedFromLosers;
 
     /* ──────────────────────── Construction ─────────────────────────── */
 
@@ -196,6 +205,17 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
             }
         }
 
+        // Slash losing-side principal into the yield pool. Only applies when
+        // there's a clear winner and the system is healthy — if impaired or
+        // escrowFailed, the losing side already lost via principal scaling
+        // or has to recover via the vault directly.
+        if (!isTie && !impaired && !escrowFailed) {
+            uint256 loserStaked = winningSide == Side.YES ? noStaked : yesStaked;
+            uint256 slash = (loserStaked * LOSER_PENALTY_BPS) / BPS_DENOM;
+            slashedFromLosers = slash;
+            yieldPool += slash;
+        }
+
         emit Settled(
             winningSide,
             yieldPool,
@@ -203,7 +223,8 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
             totalRedeemed,
             isTie,
             impaired,
-            escrowFailed
+            escrowFailed,
+            slashedFromLosers
         );
     }
 
@@ -233,10 +254,15 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
 
         uint256 principal = uint256(pos.amount);
 
-        // Pro-rata principal scaling if impaired.
+        // Pro-rata principal scaling if impaired (losers and winners alike).
         if (impaired) {
             // totalPrincipal > 0 because pos.amount > 0
             principal = (principal * totalRedeemed) / totalPrincipal;
+        } else if (!isTie && pos.side != winningSide) {
+            // Healthy non-tie loser: forfeit LOSER_PENALTY_BPS of principal.
+            // The slashed amount was added to yieldPool in settle() and is
+            // distributed to winners via the time-weighted yield share below.
+            principal -= (principal * LOSER_PENALTY_BPS) / BPS_DENOM;
         }
 
         // Yield share: only winners (or every staker if tie).

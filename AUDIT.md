@@ -280,3 +280,28 @@ The contracts are tight and well-commented; **H-1 and M-1 are the two I would no
 
 **Test status:** 39/39 passing (29 unit tests + 5 invariants × 64 sequences × 32 calls).
 **Slither status:** 0 medium/high findings; 3 low/informational accepted (reentrancy-benign, timestamp, naming-convention) with rationales documented inline.
+
+---
+
+## Post-audit mechanic change (2026-05-10): loser principal slash
+
+Added `LOSER_PENALTY_BPS = 500` (5%). At settlement in the healthy
+non-tie path, 5% of losing-side principal is moved into `yieldPool`
+and distributed to winners by time-weighted units. `claim()` deducts
+the same 5% from a loser's principal payout. Skipped on tie / impaired
+/ escrowFailed (those modes either have no loser or already penalize
+losers via principal scaling).
+
+**Why:** the original "losers get principal back, winners only get
+yield" design left the cost of being wrong at near-zero (cents of
+opportunity cost on the yield), which undercut the product's
+"skin in the game" thesis. The slash gives losing wrong an actual
+price tag without making the contract custodial in any new way —
+the slashed amount is paid out to winners in the same `claim()` call,
+not held anywhere new.
+
+**Solvency invariant still holds.** Slash is an internal redistribution
+between losing-side and winning-side claimants; total payouts ≤ total
+deposits + yield. Verified by tests + the existing solvency invariant.
+
+**Test status post-change:** 45/45 passing. Slither: no new findings.

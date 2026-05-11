@@ -39,7 +39,8 @@ interface ITakesMarket {
         uint256 totalRedeemed,
         bool isTie,
         bool impaired,
-        bool escrowFailed
+        bool escrowFailed,
+        uint256 slashedFromLosers
     );
     event Claimed(address indexed staker, uint256 principal, uint256 yieldShare);
 
@@ -104,4 +105,10 @@ interface ITakesMarket {
     ///         instead of USDC; recovery via the vault is the staker's
     ///         responsibility from there.
     function escrowFailed() external view returns (bool);
+
+    /// @notice USDC slashed from losing-side principal at settlement and
+    ///         added to the yield pool. Zero when isTie / impaired /
+    ///         escrowFailed (those modes either have no loser or already
+    ///         penalize losers via principal scaling).
+    function slashedFromLosers() external view returns (uint256);
 }
