@@ -23,10 +23,10 @@ interface ITakesMarket {
     }
 
     struct Position {
-        uint128 amount;       // USDC staked (6 decimals)
-        uint64 stakedAt;      // block.timestamp at stake
-        Side side;
-        bool claimed;         // Idempotency: each address claims at most once
+        uint128 amount;            // total USDC staked, summed across all top-ups
+        uint128 weightedTimeSum;   // Σ amount_i × stakedAt_i over all top-ups
+        Side side;                 // locked on first stake; top-ups must match
+        bool claimed;              // Idempotency: each address claims at most once
     }
 
     /* ───────────────────────── Events ───────────────────────── */
@@ -90,6 +90,12 @@ interface ITakesMarket {
 
     function asset() external view returns (IERC20);
     function lockupEnd() external view returns (uint256);
+
+    /// @notice Duration of this market's lockup window in seconds. Set at
+    ///         deploy time; immutable. Factory bounds this to a sensible
+    ///         range at creation.
+    function lockupDuration() external view returns (uint256);
+
     function settled() external view returns (bool);
 
     /// @notice Time-weighted units for a side at time `t`.

@@ -19,6 +19,18 @@ import { TakesMarket } from "./TakesMarket.sol";
 contract TakesFactory is ITakesFactory, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    /* ────────────────────────── Constants ──────────────────────────── */
+
+    /// @notice Minimum lockup duration a market can be created with.
+    ///         Anything shorter makes time-weighting too gameable —
+    ///         last-second stakes and first-block stakes get nearly
+    ///         identical unit weights.
+    uint256 public constant MIN_LOCKUP_DURATION = 1 days;
+    /// @notice Maximum lockup duration. Caps capital-lockup risk and
+    ///         keeps markets in a recognizable shape (intraday to one
+    ///         year, no decade-long predictions).
+    uint256 public constant MAX_LOCKUP_DURATION = 365 days;
+
     /* ────────────────────────── State ──────────────────────────────── */
 
     IERC20 public immutable asset;
@@ -28,6 +40,9 @@ contract TakesFactory is ITakesFactory, ReentrancyGuard {
     ///         when current guardian calls `transferGuardian(address(0))`.
     address public pendingGuardian;
     bool public paused;
+    /// @notice Keyed by `marketKey = keccak256(questionHash, lockupDuration)`
+    ///         so the same question with different lockup durations resolves
+    ///         to different markets.
     mapping(bytes32 => address) private _markets;
 
     /* ──────────────────────── Construction ─────────────────────────── */
@@ -54,13 +69,13 @@ contract TakesFactory is ITakesFactory, ReentrancyGuard {
     /// @inheritdoc ITakesFactory
     /// @dev `nonReentrant` blocks a malicious yield source's `asset()`
     ///      callback from re-entering during `new TakesMarket(...)` and
-    ///      deploying a duplicate market under the same hash.
-    function getOrCreate(bytes32 questionHash, string calldata question)
-        external
-        nonReentrant
-        returns (address market)
-    {
-        return _getOrCreate(questionHash, question);
+    ///      deploying a duplicate market under the same key.
+    function getOrCreate(
+        bytes32 questionHash,
+        string calldata question,
+        uint256 lockupDuration
+    ) external nonReentrant returns (address market) {
+        return _getOrCreate(questionHash, question, lockupDuration);
     }
 
     /// @inheritdoc ITakesFactory
@@ -72,10 +87,11 @@ contract TakesFactory is ITakesFactory, ReentrancyGuard {
     function stake(
         bytes32 questionHash,
         string calldata question,
+        uint256 lockupDuration,
         ITakesMarket.Side side,
         uint256 amount
     ) external nonReentrant returns (address market) {
-        market = _getOrCreate(questionHash, question);
+        market = _getOrCreate(questionHash, question, lockupDuration);
         // Pull USDC from caller, then forward via a one-shot approve to the
         // market. Market.stakeFor attributes the position to the caller.
         asset.safeTransferFrom(msg.sender, address(this), amount);
@@ -84,18 +100,26 @@ contract TakesFactory is ITakesFactory, ReentrancyGuard {
     }
 
     /// @dev Shared body for `getOrCreate` and `stake`. Returns the existing
-    ///      market for `questionHash` or deploys a new one wired to the
-    ///      factory's current yield source.
-    function _getOrCreate(bytes32 questionHash, string calldata question)
-        private
-        returns (address market)
-    {
-        market = _markets[questionHash];
+    ///      market for `(questionHash, lockupDuration)` or deploys a new one
+    ///      wired to the factory's current yield source. Same question with
+    ///      different lockups → different markets.
+    function _getOrCreate(
+        bytes32 questionHash,
+        string calldata question,
+        uint256 lockupDuration
+    ) private returns (address market) {
+        bytes32 key = _marketKey(questionHash, lockupDuration);
+        market = _markets[key];
         if (market != address(0)) return market;
 
         require(!paused, "paused");
         require(questionHash != bytes32(0), "zero hash");
         require(bytes(question).length > 0, "empty question");
+        require(
+            lockupDuration >= MIN_LOCKUP_DURATION
+                && lockupDuration <= MAX_LOCKUP_DURATION,
+            "lockup out of bounds"
+        );
         // On-chain integrity: the stored / emitted text must hash to the key.
         // Off-chain canonicalization (whitespace, casing) is the producer's
         // responsibility; the contract just enforces consistency.
@@ -104,50 +128,73 @@ contract TakesFactory is ITakesFactory, ReentrancyGuard {
             "hash/text mismatch"
         );
 
-        // CREATE2 with salt = questionHash. Address is deterministic in
-        // (factory, questionHash, question, asset, currentYieldSource).
+        // CREATE2 with the composite key as salt. Address is deterministic
+        // in (factory, key, question, asset, currentYieldSource, lockup).
         // The early-return above means we never hit a CREATE2 collision —
-        // a second call for the same hash returns the cached market.
-        TakesMarket newMarket = new TakesMarket{salt: questionHash}(
+        // a second call for the same key returns the cached market.
+        TakesMarket newMarket = new TakesMarket{salt: key}(
             questionHash,
             question,
             asset,
-            currentYieldSource
+            currentYieldSource,
+            lockupDuration
         );
         market = address(newMarket);
-        _markets[questionHash] = market;
+        _markets[key] = market;
 
         emit MarketCreated(
             questionHash,
             market,
             address(currentYieldSource),
+            lockupDuration,
             question,
             msg.sender
         );
     }
 
+    /// @dev Composite key for the markets mapping. Same question text +
+    ///      different lockup durations resolve to different markets.
+    function _marketKey(bytes32 questionHash, uint256 lockupDuration)
+        private
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(questionHash, lockupDuration));
+    }
+
     /* ─────────────────────────── Views ─────────────────────────────── */
 
     /// @inheritdoc ITakesFactory
-    function getMarket(bytes32 questionHash) external view returns (address) {
-        return _markets[questionHash];
-    }
-
-    /// @inheritdoc ITakesFactory
-    function predictMarket(bytes32 questionHash, string calldata question)
+    function getMarket(bytes32 questionHash, uint256 lockupDuration)
         external
         view
         returns (address)
     {
+        return _markets[_marketKey(questionHash, lockupDuration)];
+    }
+
+    /// @inheritdoc ITakesFactory
+    function predictMarket(
+        bytes32 questionHash,
+        string calldata question,
+        uint256 lockupDuration
+    ) external view returns (address) {
         bytes memory initCode = abi.encodePacked(
             type(TakesMarket).creationCode,
-            abi.encode(questionHash, question, asset, currentYieldSource)
+            abi.encode(
+                questionHash,
+                question,
+                asset,
+                currentYieldSource,
+                lockupDuration
+            )
         );
+        bytes32 key = _marketKey(questionHash, lockupDuration);
         bytes32 hash = keccak256(
             abi.encodePacked(
                 bytes1(0xff),
                 address(this),
-                questionHash,
+                key,
                 keccak256(initCode)
             )
         );

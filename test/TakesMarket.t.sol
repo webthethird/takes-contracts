@@ -24,6 +24,7 @@ contract TakesMarketTest is Test {
     bytes32 constant Q_HASH = keccak256(bytes(Q_TEXT));
 
     uint256 constant ONE_USDC = 1e6;
+    uint256 constant LOCKUP = 30 days;
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -32,7 +33,7 @@ contract TakesMarketTest is Test {
 
         // Create the market via factory (using alice as the first creator)
         vm.prank(alice);
-        address marketAddr = factory.getOrCreate(Q_HASH, Q_TEXT);
+        address marketAddr = factory.getOrCreate(Q_HASH, Q_TEXT, LOCKUP);
         market = TakesMarket(marketAddr);
 
         // Fund test users
@@ -286,11 +287,64 @@ contract TakesMarketTest is Test {
         market.stake(ITakesMarket.Side.YES, 10 * ONE_USDC);
     }
 
-    function test_cannotStakeTwice() public {
+    function test_cannotFlipSide() public {
+        // Multi-stake on the same side is allowed; flipping is not.
         _stake(alice, ITakesMarket.Side.YES, 10 * ONE_USDC);
         vm.prank(alice);
-        vm.expectRevert("already staked");
-        market.stake(ITakesMarket.Side.YES, 10 * ONE_USDC);
+        vm.expectRevert("side locked");
+        market.stake(ITakesMarket.Side.NO, 10 * ONE_USDC);
+    }
+
+    function test_canStakeTwiceOnSameSide() public {
+        _stake(alice, ITakesMarket.Side.YES, 10 * ONE_USDC);
+        // Add to the existing YES position.
+        _stake(alice, ITakesMarket.Side.YES, 5 * ONE_USDC);
+
+        ITakesMarket.Position memory pos = market.position(alice);
+        assertEq(pos.amount, 15 * ONE_USDC, "amounts accumulate");
+        assertEq(uint8(pos.side), uint8(ITakesMarket.Side.YES));
+        assertEq(market.totalStaked(ITakesMarket.Side.YES), 15 * ONE_USDC);
+    }
+
+    function test_topUpRespectsMaxStake() public {
+        _stake(alice, ITakesMarket.Side.YES, 999 * ONE_USDC);
+        // 999 + 2 > MAX_STAKE (1000)
+        vm.prank(alice);
+        vm.expectRevert("amount above max");
+        market.stake(ITakesMarket.Side.YES, 2 * ONE_USDC);
+    }
+
+    function test_topUp_timeWeightedUnitsAreCorrect() public {
+        // Top-up that combines a $10 early stake (full lockup) and a $10
+        // mid-lockup top-up (half lockup) should produce units equal to
+        // a single $20 stake locked for the average 22.5 days.
+        uint256 firstStakeAt = block.timestamp;
+        _stake(alice, ITakesMarket.Side.YES, 10 * ONE_USDC);
+        vm.warp(firstStakeAt + 15 days);
+        _stake(alice, ITakesMarket.Side.YES, 10 * ONE_USDC);
+
+        uint256 lockupEnd = market.lockupEnd();
+        // alice's units = 10 × (lockupEnd − firstStakeAt) + 10 × (lockupEnd − (firstStakeAt+15d))
+        //               = 10 × 30d × 1e6 + 10 × 15d × 1e6
+        //               = 4_500 × 1e6 × (1 day)
+        uint256 expected = (10 * ONE_USDC) * 30 days + (10 * ONE_USDC) * 15 days;
+        uint256 actual = market.totalUnitsAt(ITakesMarket.Side.YES, lockupEnd);
+        assertEq(actual, expected, "aggregate yesUnits must reflect top-up weighting");
+
+        // Carry through to settlement: bob stakes 20 NO at firstStakeAt+15d
+        // and is locked for only 15d, so his units are exactly half of
+        // alice's. Alice wins.
+        _stake(bob, ITakesMarket.Side.NO, 20 * ONE_USDC);
+        uint256 expectedBob = (20 * ONE_USDC) * 15 days;
+        assertEq(
+            market.totalUnitsAt(ITakesMarket.Side.NO, lockupEnd),
+            expectedBob,
+            "bob noUnits"
+        );
+
+        vm.warp(lockupEnd);
+        market.settle();
+        assertEq(uint8(market.winningSide()), uint8(ITakesMarket.Side.YES));
     }
 
     function test_cannotSettleEarly() public {
@@ -328,11 +382,11 @@ contract TakesMarketTest is Test {
 
     function test_stakeAmountBounds() public {
         vm.prank(alice);
-        vm.expectRevert("amount out of bounds");
+        vm.expectRevert("amount below min");
         market.stake(ITakesMarket.Side.YES, ONE_USDC - 1); // below MIN_STAKE
 
         vm.prank(alice);
-        vm.expectRevert("amount out of bounds");
+        vm.expectRevert("amount above max");
         market.stake(ITakesMarket.Side.YES, 1001 * ONE_USDC); // above MAX_STAKE
     }
 

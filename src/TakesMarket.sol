@@ -17,11 +17,13 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
 
     /* ────────────────────────── Constants ──────────────────────────── */
 
-    /// @notice Lockup duration. Markets are not parameterized — global constant.
-    uint256 public constant LOCKUP_DURATION = 30 days;
-    /// @notice $1 USDC (USDC has 6 decimals)
+    /// @notice $1 USDC (USDC has 6 decimals). Applies to each individual
+    ///         stake; a sub-$1 top-up reverts.
     uint256 public constant MIN_STAKE = 1e6;
-    /// @notice $1000 USDC
+    /// @notice $1000 USDC. Applies to TOTAL position size per address per
+    ///         market (cumulative across all stakes), not per individual
+    ///         stake. A stake that would push the running total over the
+    ///         cap reverts.
     uint256 public constant MAX_STAKE = 1000e6;
     /// @notice Fraction of losing-side principal forfeited to the winning
     ///         side at settlement, in basis points (1 bp = 0.01%). 1000 = 10%.
@@ -36,6 +38,11 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
     IERC20 public immutable asset;
     IERC4626 public immutable yieldSource;
     uint256 public immutable lockupEnd;
+    /// @notice Duration of the lockup window (seconds). Set at deploy
+    ///         time per market; the factory bounds it to a sensible
+    ///         range. Exposed for off-chain consumers; on-chain logic
+    ///         keys off `lockupEnd` directly.
+    uint256 public immutable lockupDuration;
 
     /* ──────────────────────── Mutable state ────────────────────────── */
 
@@ -81,14 +88,17 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
         bytes32 _questionHash,
         string memory _question,
         IERC20 _asset,
-        IERC4626 _yieldSource
+        IERC4626 _yieldSource,
+        uint256 _lockupDuration
     ) {
         require(_yieldSource.asset() == address(_asset), "asset mismatch");
+        require(_lockupDuration > 0, "lockup zero");
         questionHash = _questionHash;
         question = _question;
         asset = _asset;
         yieldSource = _yieldSource;
-        lockupEnd = block.timestamp + LOCKUP_DURATION;
+        lockupDuration = _lockupDuration;
+        lockupEnd = block.timestamp + _lockupDuration;
 
         // One-time max approval. The yield source pulls USDC from this market
         // when we call deposit(); pre-approving avoids a per-stake approve.
@@ -114,31 +124,57 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
     ///      `from` is who pays the USDC (`safeTransferFrom` source). For
     ///      `stake`, both are msg.sender. For `stakeFor`, `from` is msg.sender
     ///      (the sponsor / factory) and `staker` is the beneficiary.
+    ///
+    ///      Multiple stakes per staker are allowed and accumulate into a
+    ///      single position. The first stake locks the side; subsequent
+    ///      stakes must match. MAX_STAKE caps the total position
+    ///      (cumulative across all adds), not each individual add.
+    ///      `weightedTimeSum` tracks Σ amount_i × stakedAt_i for the
+    ///      staker, used by `claim()` to compute time-weighted units as
+    ///      `amount × lockupEnd − weightedTimeSum`.
     function _stake(address staker, address from, Side side, uint256 amount) private {
         require(block.timestamp < lockupEnd, "lockup ended");
-        require(amount >= MIN_STAKE && amount <= MAX_STAKE, "amount out of bounds");
+        require(amount >= MIN_STAKE, "amount below min");
 
         Position storage pos = _positions[staker];
-        require(pos.amount == 0, "already staked");
+        // First stake locks the side; subsequent adds must match it. The
+        // "no flipping" property is preserved from V0.
+        require(pos.amount == 0 || pos.side == side, "side locked");
+        // Total position is capped at MAX_STAKE across all adds.
+        uint256 newTotal = uint256(pos.amount) + amount;
+        require(newTotal <= MAX_STAKE, "amount above max");
+
+        uint256 weightedDelta = amount * block.timestamp;
 
         // Update side aggregates BEFORE external calls (CEI).
         if (side == Side.YES) {
             yesStaked += amount;
-            yesWeightedTimeSum += amount * block.timestamp;
+            yesWeightedTimeSum += weightedDelta;
         } else {
             noStaked += amount;
-            noWeightedTimeSum += amount * block.timestamp;
+            noWeightedTimeSum += weightedDelta;
         }
-        _positions[staker] = Position({
-            // Safe: amount is bounded by MAX_STAKE = 1000e6, far below 2^128
+
+        if (pos.amount == 0) {
+            // First stake for this staker.
+            _positions[staker] = Position({
+                // Safe: newTotal ≤ MAX_STAKE = 1000e6, far below 2^128
+                // forge-lint: disable-next-line(unsafe-typecast)
+                amount: uint128(newTotal),
+                // Safe: amount × block.timestamp ≤ MAX_STAKE × uint64.max
+                //       ≈ 1.8e28, far below 2^128 ≈ 3.4e38
+                // forge-lint: disable-next-line(unsafe-typecast)
+                weightedTimeSum: uint128(weightedDelta),
+                side: side,
+                claimed: false
+            });
+        } else {
+            // Top-up: extend the running totals on the existing position.
             // forge-lint: disable-next-line(unsafe-typecast)
-            amount: uint128(amount),
-            // Safe: block.timestamp fits uint64 until year 584554
+            pos.amount = uint128(newTotal);
             // forge-lint: disable-next-line(unsafe-typecast)
-            stakedAt: uint64(block.timestamp),
-            side: side,
-            claimed: false
-        });
+            pos.weightedTimeSum = uint128(uint256(pos.weightedTimeSum) + weightedDelta);
+        }
 
         // Pull USDC from the funds source. They must have approved this market.
         asset.safeTransferFrom(from, address(this), amount);
@@ -284,8 +320,12 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
         // Yield share: only winners (or every staker if tie).
         uint256 yieldShare = 0;
         if (yieldPool > 0 && (isTie || pos.side == winningSide)) {
-            // myUnits = amount × (lockupEnd − stakedAt)
-            uint256 myUnits = uint256(pos.amount) * (lockupEnd - uint256(pos.stakedAt));
+            // myUnits = Σ amount_i × (lockupEnd − stakedAt_i)
+            //         = amount × lockupEnd − weightedTimeSum
+            // Same total-units formula used at the aggregate level in
+            // settle(); generalizes cleanly to multiple top-up stakes.
+            uint256 myUnits =
+                uint256(pos.amount) * lockupEnd - uint256(pos.weightedTimeSum);
             // winningUnits > 0 because someone won (or all tied with positions)
             yieldShare = (myUnits * yieldPool) / winningUnits;
         }

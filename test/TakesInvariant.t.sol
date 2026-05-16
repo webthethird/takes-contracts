@@ -127,13 +127,15 @@ contract TakesInvariantTest is Test {
     address constant USER_4 = address(0xA4);
     address constant USER_5 = address(0xA5);
 
+    uint256 constant LOCKUP = 30 days;
+
     function setUp() public {
         usdc = new MockUSDC();
         vault = new MockYieldVault(usdc);
         TakesFactory factory = new TakesFactory(usdc, vault, address(this));
         string memory qText = "invariant test";
         market = TakesMarket(
-            factory.getOrCreate(keccak256(bytes(qText)), qText)
+            factory.getOrCreate(keccak256(bytes(qText)), qText, LOCKUP)
         );
 
         address[] memory users = new address[](5);

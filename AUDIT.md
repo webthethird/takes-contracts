@@ -381,3 +381,92 @@ for off-chain indexers/preflight tooling.
 
 **Test status post-change:** 55/55 passing. Slither: no new findings
 expected (additive surface; rerun before mainnet).
+
+---
+
+## Post-audit mechanic change (2026-05-16): per-market lockup + multi-stake
+
+Two coupled changes shipped together:
+
+### Configurable per-market lockup
+
+`LOCKUP_DURATION` is no longer a global constant; each market is
+constructed with its own immutable `lockupDuration`. The factory bounds
+caller-supplied values to `[MIN_LOCKUP_DURATION = 1 days,
+MAX_LOCKUP_DURATION = 365 days]` — anything shorter makes
+time-weighting near-uniform (no early-conviction advantage), anything
+longer is unhelpful and a hard sell on capital lockup.
+
+**Mapping reshape.** `_markets` is now keyed by
+`keccak256(abi.encode(questionHash, lockupDuration))`. Same question
+text with different lockup durations resolves to *different* markets.
+CREATE2 salt is the same composite key, so prediction stays
+deterministic. The `MarketCreated` event gains a non-indexed
+`lockupDuration` field (3 indexed slots remain: questionHash, market,
+yieldSource).
+
+**External signatures changed** (breaking — fresh factory):
+- `getOrCreate(bytes32, string, uint256)` — adds lockup
+- `stake(bytes32, string, uint256, Side, uint256)` — adds lockup
+- `getMarket(bytes32, uint256)` — adds lockup
+- `predictMarket(bytes32, string, uint256)` — adds lockup
+
+**M-5 intensified for short lockups.** The audit flagged that a large
+last-second stake can flip time-weighted units at low TVL. Shorter
+lockups compress the ratio between "early" and "late" units — at the
+1-day floor, units differ by less than 24h of weighting. The aspect
+ratio of late-stake risk vs. early-conviction reward is *worse* on
+short markets. Acceptable for V0 (off-chain Sybil resistance via
+Farcaster identity still applies), but worth a NatSpec warning to
+composers building short-lockup markets at scale.
+
+### Multi-stake (position top-ups)
+
+Stakers can now add to an existing position multiple times, on the same
+side. The V0 "no flipping" property is preserved — first stake locks
+the side, subsequent stakes must match (`"side locked"` revert).
+
+**Position struct reshape** (breaking — slot layout differs):
+
+```solidity
+struct Position {
+    uint128 amount;          // total USDC summed across all top-ups
+    uint128 weightedTimeSum; // Σ amount_i × stakedAt_i over all top-ups
+    Side side;
+    bool claimed;
+}
+```
+
+`stakedAt` (uint64) is replaced with `weightedTimeSum` (uint128). The
+running sum is what `claim()`'s units math needs — `myUnits =
+amount × lockupEnd − weightedTimeSum` — and matches the aggregate
+unit formula already used at the side level in `settle()`. One extra
+storage slot vs. the old layout, but the math generalizes cleanly:
+both single-stake and multi-stake positions use the same line.
+
+**MAX_STAKE caps the total position, not per-add.** A stake that would
+push the running total over $1000 reverts with `"amount above max"`.
+MIN_STAKE = $1 still applies to each individual add (no sub-dollar
+top-ups). This preserves the Sybil-resistance story — a single address
+can't exceed $1000 exposure regardless of how many adds.
+
+**Overflow analysis for `weightedTimeSum`.** `amount × block.timestamp
+≤ MAX_STAKE × uint64.max ≈ 1.8e28`; summed across multiple adds the
+running total is bounded by `MAX_STAKE × uint64.max ≈ 1.8e28` (since
+amount itself can't exceed MAX_STAKE in total). uint128 max is
+≈ 3.4e38 — ten orders of magnitude of headroom. Casts in `_stake` are
+safe and inline-commented.
+
+**Solvency invariant unchanged.** Multi-stake adds amounts and weighted
+times to existing aggregates with the same arithmetic as the V0 single-
+stake path. The `TakesInvariant` solvency check (`totalRedeemed ==
+sum(claims)` at healthy settlement) passes 5/5 fuzz runs × 64 sequences
+× 32 calls under the new model.
+
+### Test status
+
+64/64 passing. 9 new tests: 5 for lockup bounds and same-question-
+different-lockup market distinctness; 4 for multi-stake including the
+side-lock + MAX_STAKE + time-weighting math invariants.
+
+Slither rerun pending before next deploy.

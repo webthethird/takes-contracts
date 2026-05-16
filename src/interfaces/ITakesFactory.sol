@@ -24,6 +24,7 @@ interface ITakesFactory {
         bytes32 indexed questionHash,
         address indexed market,
         address indexed yieldSource,
+        uint256 lockupDuration,
         string question,
         address creator
     );
@@ -36,16 +37,21 @@ interface ITakesFactory {
 
     /* ─────────────────────── User actions ───────────────────── */
 
-    /// @notice Returns the existing market for `questionHash`, or deploys
-    ///         a new one if none exists. The new market is wired to the
-    ///         factory's current yield source. Most callers should use
-    ///         `stake` instead, which combines create-and-stake into one tx;
-    ///         `getOrCreate` is kept for indexers and advanced flows.
+    /// @notice Returns the existing market for `(questionHash, lockupDuration)`,
+    ///         or deploys a new one if none exists. The new market is wired
+    ///         to the factory's current yield source. Same question text +
+    ///         different lockup durations resolve to distinct markets. Most
+    ///         callers should use `stake` instead, which combines create-
+    ///         and-stake into one tx; `getOrCreate` is kept for indexers
+    ///         and advanced flows.
     /// @dev    `question` is only read on first call (deployment). On
     ///         repeat calls the existing market is returned as-is.
+    ///         `lockupDuration` is validated against the factory's
+    ///         [MIN_LOCKUP_DURATION, MAX_LOCKUP_DURATION] range.
     function getOrCreate(
         bytes32 questionHash,
-        string calldata question
+        string calldata question,
+        uint256 lockupDuration
     ) external returns (address market);
 
     /// @notice Create-or-fetch a market and stake on the caller's behalf in
@@ -57,29 +63,38 @@ interface ITakesFactory {
     ///         force-approves the market for that amount, then calls
     ///         `market.stakeFor(msg.sender, side, amount)`. Reverts if the
     ///         caller's USDC balance or factory allowance is insufficient,
-    ///         if amount is out of bounds, or if lockup has ended.
+    ///         if amount is out of bounds, if lockup has ended, or if
+    ///         lockupDuration is outside the factory's allowed range.
     function stake(
         bytes32 questionHash,
         string calldata question,
+        uint256 lockupDuration,
         ITakesMarket.Side side,
         uint256 amount
     ) external returns (address market);
 
     /* ──────────────────────── Views ─────────────────────────── */
 
-    function getMarket(bytes32 questionHash) external view returns (address);
-
-    /// @notice Predicts the CREATE2 address a new market would be deployed
-    ///         to under the factory's CURRENT yield source. If a market for
-    ///         this questionHash already exists (`getMarket != 0`), use that
-    ///         address instead — it may have been deployed under a previous
-    ///         yield source and live at a different address.
-    /// @dev    Useful for batched on-chain flows that need to pre-approve
-    ///         USDC to the market in the same wallet popup as `getOrCreate`.
-    function predictMarket(bytes32 questionHash, string calldata question)
+    /// @notice Returns the market address for `(questionHash, lockupDuration)`,
+    ///         or `address(0)` if none has been deployed.
+    function getMarket(bytes32 questionHash, uint256 lockupDuration)
         external
         view
         returns (address);
+
+    /// @notice Predicts the CREATE2 address a new market would be deployed
+    ///         to under the factory's CURRENT yield source. If a market for
+    ///         this (questionHash, lockupDuration) already exists, use
+    ///         `getMarket` instead — it may have been deployed under a
+    ///         previous yield source and live at a different address.
+    /// @dev    Cheap pure-view; retained for off-chain indexers and
+    ///         preflight tooling. The single-tx `stake` orchestrator no
+    ///         longer needs it.
+    function predictMarket(
+        bytes32 questionHash,
+        string calldata question,
+        uint256 lockupDuration
+    ) external view returns (address);
     function asset() external view returns (IERC20);
     function currentYieldSource() external view returns (IERC4626);
     function guardian() external view returns (address);
