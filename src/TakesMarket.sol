@@ -99,10 +99,26 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
 
     /// @inheritdoc ITakesMarket
     function stake(Side side, uint256 amount) external nonReentrant {
+        _stake(msg.sender, msg.sender, side, amount);
+    }
+
+    /// @inheritdoc ITakesMarket
+    function stakeFor(address staker, Side side, uint256 amount) external nonReentrant {
+        require(staker != address(0), "staker zero");
+        _stake(staker, msg.sender, side, amount);
+    }
+
+    /// @dev Shared body for `stake` and `stakeFor`.
+    ///      `staker` is who the position is attributed to (counted toward
+    ///      time-weighted units and entitled to claim).
+    ///      `from` is who pays the USDC (`safeTransferFrom` source). For
+    ///      `stake`, both are msg.sender. For `stakeFor`, `from` is msg.sender
+    ///      (the sponsor / factory) and `staker` is the beneficiary.
+    function _stake(address staker, address from, Side side, uint256 amount) private {
         require(block.timestamp < lockupEnd, "lockup ended");
         require(amount >= MIN_STAKE && amount <= MAX_STAKE, "amount out of bounds");
 
-        Position storage pos = _positions[msg.sender];
+        Position storage pos = _positions[staker];
         require(pos.amount == 0, "already staked");
 
         // Update side aggregates BEFORE external calls (CEI).
@@ -113,7 +129,7 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
             noStaked += amount;
             noWeightedTimeSum += amount * block.timestamp;
         }
-        _positions[msg.sender] = Position({
+        _positions[staker] = Position({
             // Safe: amount is bounded by MAX_STAKE = 1000e6, far below 2^128
             // forge-lint: disable-next-line(unsafe-typecast)
             amount: uint128(amount),
@@ -124,15 +140,15 @@ contract TakesMarket is ITakesMarket, ReentrancyGuard {
             claimed: false
         });
 
-        // Pull USDC from the staker. They must have approved this market.
-        asset.safeTransferFrom(msg.sender, address(this), amount);
+        // Pull USDC from the funds source. They must have approved this market.
+        asset.safeTransferFrom(from, address(this), amount);
         // Supply to the yield source. Shares accrue to this market.
         // Per-stake share count is intentionally ignored — settle() reads
         // total shares via yieldSource.balanceOf(address(this)).
         // slither-disable-next-line unused-return
         yieldSource.deposit(amount, address(this));
 
-        emit Staked(msg.sender, side, amount, block.timestamp);
+        emit Staked(staker, side, amount, block.timestamp);
     }
 
     /// @inheritdoc ITakesMarket

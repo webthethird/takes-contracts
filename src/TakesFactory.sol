@@ -3,9 +3,11 @@ pragma solidity ^0.8.24;
 
 import { IERC20 } from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import { IERC4626 } from "openzeppelin-contracts/interfaces/IERC4626.sol";
+import { SafeERC20 } from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
 import { ReentrancyGuard } from "openzeppelin-contracts/utils/ReentrancyGuard.sol";
 
 import { ITakesFactory } from "./interfaces/ITakesFactory.sol";
+import { ITakesMarket } from "./interfaces/ITakesMarket.sol";
 import { TakesMarket } from "./TakesMarket.sol";
 
 /// @title TakesFactory
@@ -15,6 +17,8 @@ import { TakesMarket } from "./TakesMarket.sol";
 ///         current at their creation — the factory's source rotation
 ///         affects only future deployments.
 contract TakesFactory is ITakesFactory, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     /* ────────────────────────── State ──────────────────────────────── */
 
     IERC20 public immutable asset;
@@ -54,6 +58,36 @@ contract TakesFactory is ITakesFactory, ReentrancyGuard {
     function getOrCreate(bytes32 questionHash, string calldata question)
         external
         nonReentrant
+        returns (address market)
+    {
+        return _getOrCreate(questionHash, question);
+    }
+
+    /// @inheritdoc ITakesFactory
+    /// @dev Single-tx create-and-stake. Caller approves USDC to the factory
+    ///      once (not per-market), then every stake on any market is a single
+    ///      tx — collapses the worst case from 3 popups to 1. The factory
+    ///      briefly holds the caller's USDC between transferFrom and
+    ///      market.stakeFor; USDC has no transfer hooks so this is safe.
+    function stake(
+        bytes32 questionHash,
+        string calldata question,
+        ITakesMarket.Side side,
+        uint256 amount
+    ) external nonReentrant returns (address market) {
+        market = _getOrCreate(questionHash, question);
+        // Pull USDC from caller, then forward via a one-shot approve to the
+        // market. Market.stakeFor attributes the position to the caller.
+        asset.safeTransferFrom(msg.sender, address(this), amount);
+        asset.forceApprove(market, amount);
+        ITakesMarket(market).stakeFor(msg.sender, side, amount);
+    }
+
+    /// @dev Shared body for `getOrCreate` and `stake`. Returns the existing
+    ///      market for `questionHash` or deploys a new one wired to the
+    ///      factory's current yield source.
+    function _getOrCreate(bytes32 questionHash, string calldata question)
+        private
         returns (address market)
     {
         market = _markets[questionHash];

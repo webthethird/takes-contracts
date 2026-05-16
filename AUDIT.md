@@ -305,3 +305,79 @@ between losing-side and winning-side claimants; total payouts ≤ total
 deposits + yield. Verified by tests + the existing solvency invariant.
 
 **Test status post-change:** 45/45 passing. Slither: no new findings.
+
+---
+
+## Post-audit mechanic change (2026-05-16): single-tx create-and-stake
+
+Added a factory-level orchestrator so the worst-case staker UX collapses
+from 3 wallet popups (approve → getOrCreate → stake) to 2 first-time-ever
+(approve factory + stake), and 1 popup forever after (stake) — across any
+market. Allowance is now scoped to the factory, not per-market.
+
+### Surface
+
+**TakesMarket** (additive — no audited paths changed):
+- `_stake(staker, from, side, amount)` private — extracted body of the
+  audited `stake`. Identical accounting; `staker` is the position
+  attribution, `from` is the funds source.
+- `stake(side, amount)` external — unchanged signature and behavior;
+  now a thin wrapper for `_stake(msg.sender, msg.sender, ...)`.
+- `stakeFor(address staker, Side side, uint256 amount)` external
+  nonReentrant — new public entry. Anyone can call. USDC pulled from
+  msg.sender; position attributed to `staker`.
+
+**TakesFactory** (additive):
+- `_getOrCreate(hash, question)` private — extracted body of the audited
+  `getOrCreate`. Identical CREATE2 + paused/hash-text checks.
+- `getOrCreate(hash, question)` external — unchanged signature and
+  behavior; thin wrapper.
+- `stake(hash, question, side, amount)` external nonReentrant — new
+  orchestrator. `_getOrCreate` → `safeTransferFrom(msg.sender, factory,
+  amount)` → `forceApprove(market, amount)` → `market.stakeFor(msg.sender,
+  side, amount)`.
+
+### Why
+
+Wallet UX: Farcaster's native (Coinbase Smart Wallet) doesn't reliably
+batch via EIP-5792, and MetaMask attempts an EIP-7702 SetCode upgrade
+whose simulator can't accurately price testnet gas — both surfaced as
+"Insufficient funds" / "Network fee unavailable" warnings even at 0.002
+ETH. Routing through a factory facade sidesteps batching entirely while
+yielding strictly better UX: a one-time approve to a fixed address means
+*subsequent* stakes are a single tx, ever, on any market.
+
+### Griefing analysis for `stakeFor`
+
+Anyone can call `Market.stakeFor(victim, side, amount)` and pay USDC out
+of their own pocket to give `victim` a position on a side `victim`
+didn't pick. Cost-of-attack: ≥$1 (MIN_STAKE). Damage: victim is locked
+out of staking on this market themselves (single-position-per-address
+invariant from V0 still holds) and can lose up to 10% of the planted
+$1 at settlement if the attributed side loses. The griefer's USDC is
+fully consumed; the victim can claim the remaining principal back. Net
+~$0.10 of damage per $1 of griefer capital — uneconomical except as
+pure spite. Acceptable for V0.
+
+If the griefing surface ever needs to be closed: gate `stakeFor` to
+`onlyFactory`. That kills general gas-sponsorship integrations but
+makes the factory the only attribution route.
+
+### Solvency invariant
+
+Unchanged. The factory holds caller USDC for one call-frame between
+transferFrom and the market's stakeFor; USDC has no transfer hooks so
+reentrancy is not a concern. Allowance to the market is the exact
+`amount` (force-approved, then fully consumed by the stake — verified
+by `test_factoryStake_allowanceIsConsumedOnlyByAmount`). Factory holds
+no lingering allowance after the call returns.
+
+### `predictMarket` status
+
+Retained but now vestigial. It existed to support pre-approval to the
+CREATE2-predicted market in the same EIP-5792 batch as `getOrCreate`;
+the single-tx orchestrator no longer needs it. Kept as a cheap view
+for off-chain indexers/preflight tooling.
+
+**Test status post-change:** 55/55 passing. Slither: no new findings
+expected (additive surface; rerun before mainnet).

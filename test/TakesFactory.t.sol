@@ -236,4 +236,163 @@ contract TakesFactoryTest is Test {
         vm.expectRevert("no pending");
         factory.acceptGuardian();
     }
+
+    /* ──────────────────── factory.stake orchestrator ───────────── */
+
+    uint256 constant STAKE_AMT = 10e6; // $10 USDC
+
+    function _fundAndApprove(address user, uint256 amount) internal {
+        usdc.mint(user, amount);
+        vm.prank(user);
+        usdc.approve(address(factory), type(uint256).max);
+    }
+
+    function test_factoryStake_createsMarketAndStakes() public {
+        _fundAndApprove(alice, STAKE_AMT);
+        // No market exists yet.
+        assertEq(factory.getMarket(Q1), address(0));
+
+        vm.prank(alice);
+        address market = factory.stake(Q1, Q1_TEXT, ITakesMarket.Side.YES, STAKE_AMT);
+
+        // Market was created and registered.
+        assertTrue(market != address(0));
+        assertEq(factory.getMarket(Q1), market);
+        // Alice is attributed the position, not the factory.
+        ITakesMarket.Position memory pos = TakesMarket(market).position(alice);
+        assertEq(pos.amount, STAKE_AMT);
+        assertEq(uint8(pos.side), uint8(ITakesMarket.Side.YES));
+        ITakesMarket.Position memory factoryPos = TakesMarket(market).position(address(factory));
+        assertEq(factoryPos.amount, 0);
+        // USDC flowed alice → factory → market → yieldSource.
+        assertEq(usdc.balanceOf(alice), 0);
+        assertEq(usdc.balanceOf(address(factory)), 0);
+    }
+
+    function test_factoryStake_usesExistingMarket() public {
+        // First staker creates the market via the factory orchestrator.
+        _fundAndApprove(alice, STAKE_AMT);
+        vm.prank(alice);
+        address m1 = factory.stake(Q1, Q1_TEXT, ITakesMarket.Side.YES, STAKE_AMT);
+
+        // Second staker on the same question reuses the market.
+        address bob = makeAddr("bob");
+        _fundAndApprove(bob, STAKE_AMT);
+        vm.prank(bob);
+        address m2 = factory.stake(Q1, Q1_TEXT, ITakesMarket.Side.NO, STAKE_AMT);
+
+        assertEq(m1, m2);
+        // Both positions live on the same market.
+        ITakesMarket.Position memory aPos = TakesMarket(m1).position(alice);
+        ITakesMarket.Position memory bPos = TakesMarket(m1).position(bob);
+        assertEq(aPos.amount, STAKE_AMT);
+        assertEq(bPos.amount, STAKE_AMT);
+        assertEq(uint8(aPos.side), uint8(ITakesMarket.Side.YES));
+        assertEq(uint8(bPos.side), uint8(ITakesMarket.Side.NO));
+    }
+
+    function test_factoryStake_revertsWithoutAllowance() public {
+        usdc.mint(alice, STAKE_AMT);
+        // No approve.
+        vm.prank(alice);
+        vm.expectRevert();
+        factory.stake(Q1, Q1_TEXT, ITakesMarket.Side.YES, STAKE_AMT);
+    }
+
+    function test_factoryStake_revertsWithoutBalance() public {
+        // Approved but no USDC.
+        vm.prank(alice);
+        usdc.approve(address(factory), type(uint256).max);
+        vm.prank(alice);
+        vm.expectRevert();
+        factory.stake(Q1, Q1_TEXT, ITakesMarket.Side.YES, STAKE_AMT);
+    }
+
+    function test_factoryStake_revertsWhenPaused() public {
+        _fundAndApprove(alice, STAKE_AMT);
+        vm.prank(guardian);
+        factory.pause();
+        vm.prank(alice);
+        vm.expectRevert("paused");
+        factory.stake(Q1, Q1_TEXT, ITakesMarket.Side.YES, STAKE_AMT);
+    }
+
+    function test_factoryStake_pauseAllowsStakingExistingMarket() public {
+        // Existing markets are not held hostage by pause — the orchestrator
+        // routes to an existing market without re-creating, so stakes on
+        // already-deployed markets keep working.
+        _fundAndApprove(alice, STAKE_AMT);
+        vm.prank(alice);
+        factory.stake(Q1, Q1_TEXT, ITakesMarket.Side.YES, STAKE_AMT);
+
+        vm.prank(guardian);
+        factory.pause();
+
+        address bob = makeAddr("bob");
+        _fundAndApprove(bob, STAKE_AMT);
+        vm.prank(bob);
+        address m = factory.stake(Q1, Q1_TEXT, ITakesMarket.Side.NO, STAKE_AMT);
+        assertTrue(m != address(0));
+        assertEq(TakesMarket(m).position(bob).amount, STAKE_AMT);
+    }
+
+    function test_factoryStake_allowanceIsConsumedOnlyByAmount() public {
+        // Confirm factory uses max-allowance pattern correctly: the
+        // force-approve to the market is for `amount` only, not max, so
+        // the factory holds no lingering allowance to the market.
+        _fundAndApprove(alice, STAKE_AMT);
+        vm.prank(alice);
+        address market = factory.stake(Q1, Q1_TEXT, ITakesMarket.Side.YES, STAKE_AMT);
+        assertEq(usdc.allowance(address(factory), market), 0);
+    }
+
+    /* ──────────────────── market.stakeFor direct ─────────────── */
+
+    function test_stakeFor_attributesToStakerNotCaller() public {
+        // Sponsor pays USDC; staker gets the position.
+        address sponsor = makeAddr("sponsor");
+        usdc.mint(sponsor, STAKE_AMT);
+
+        // Deploy the market via getOrCreate first.
+        address marketAddr = factory.getOrCreate(Q1, Q1_TEXT);
+        TakesMarket market = TakesMarket(marketAddr);
+
+        vm.prank(sponsor);
+        usdc.approve(marketAddr, type(uint256).max);
+
+        vm.prank(sponsor);
+        market.stakeFor(alice, ITakesMarket.Side.YES, STAKE_AMT);
+
+        // Position on alice, not sponsor.
+        assertEq(market.position(alice).amount, STAKE_AMT);
+        assertEq(market.position(sponsor).amount, 0);
+        // USDC came from sponsor.
+        assertEq(usdc.balanceOf(sponsor), 0);
+    }
+
+    function test_stakeFor_zeroStakerReverts() public {
+        address marketAddr = factory.getOrCreate(Q1, Q1_TEXT);
+        TakesMarket market = TakesMarket(marketAddr);
+        usdc.mint(address(this), STAKE_AMT);
+        usdc.approve(marketAddr, type(uint256).max);
+        vm.expectRevert("staker zero");
+        market.stakeFor(address(0), ITakesMarket.Side.YES, STAKE_AMT);
+    }
+
+    function test_stakeFor_doubleStakeReverts() public {
+        address marketAddr = factory.getOrCreate(Q1, Q1_TEXT);
+        TakesMarket market = TakesMarket(marketAddr);
+        _fundAndApprove(alice, STAKE_AMT * 2);
+        // First via factory orchestrator
+        vm.prank(alice);
+        factory.stake(Q1, Q1_TEXT, ITakesMarket.Side.YES, STAKE_AMT);
+        // Second via direct stakeFor against same alice — must revert.
+        address sponsor = makeAddr("sponsor");
+        usdc.mint(sponsor, STAKE_AMT);
+        vm.prank(sponsor);
+        usdc.approve(marketAddr, type(uint256).max);
+        vm.prank(sponsor);
+        vm.expectRevert("already staked");
+        market.stakeFor(alice, ITakesMarket.Side.NO, STAKE_AMT);
+    }
 }

@@ -51,6 +51,18 @@ interface ITakesMarket {
     ///         if amount is outside the configured bounds.
     function stake(Side side, uint256 amount) external;
 
+    /// @notice Stake on a side and attribute the position to `staker`. USDC
+    ///         is pulled from `msg.sender` (who must have approved this
+    ///         market); the position, time-weighted units, and future
+    ///         `claim()` rights belong to `staker`. Intended for the factory
+    ///         orchestrator and gas-sponsorship integrations.
+    /// @dev    Anyone can call this for any `staker`. Worst-case griefing
+    ///         is paying ≥$1 to lock a victim into a side they didn't pick,
+    ///         which is uneconomical: the griefer's USDC sits on the
+    ///         attributed side, and the victim claims principal back at
+    ///         settlement (minus the 10% slash if that side loses).
+    function stakeFor(address staker, Side side, uint256 amount) external;
+
     /// @notice Permissionless. Triggers settlement once `block.timestamp >=
     ///         lockupEnd()`. Redeems all of this market's ERC4626 shares;
     ///         snapshots winning side and yield pool. Idempotent.

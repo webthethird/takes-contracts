@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import { IERC20 } from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import { IERC4626 } from "openzeppelin-contracts/interfaces/IERC4626.sol";
 
+import { ITakesMarket } from "./ITakesMarket.sol";
+
 /// @title ITakesFactory
 /// @notice Looks up an existing TakesMarket by question hash or deploys a
 ///         new one. Markets are addressed by `keccak256(canonical question)`
@@ -36,14 +38,31 @@ interface ITakesFactory {
 
     /// @notice Returns the existing market for `questionHash`, or deploys
     ///         a new one if none exists. The new market is wired to the
-    ///         factory's current yield source. The first staker pays the
-    ///         creation cost (their tx is typically a multicall:
-    ///         getOrCreate + market.stake).
+    ///         factory's current yield source. Most callers should use
+    ///         `stake` instead, which combines create-and-stake into one tx;
+    ///         `getOrCreate` is kept for indexers and advanced flows.
     /// @dev    `question` is only read on first call (deployment). On
     ///         repeat calls the existing market is returned as-is.
     function getOrCreate(
         bytes32 questionHash,
         string calldata question
+    ) external returns (address market);
+
+    /// @notice Create-or-fetch a market and stake on the caller's behalf in
+    ///         a single transaction. Caller approves USDC to the FACTORY
+    ///         once (not per-market); every subsequent stake is one popup.
+    ///         Position attribution and future claim rights belong to
+    ///         msg.sender — the factory is a pass-through.
+    /// @dev    Pulls `amount` USDC from msg.sender via safeTransferFrom,
+    ///         force-approves the market for that amount, then calls
+    ///         `market.stakeFor(msg.sender, side, amount)`. Reverts if the
+    ///         caller's USDC balance or factory allowance is insufficient,
+    ///         if amount is out of bounds, or if lockup has ended.
+    function stake(
+        bytes32 questionHash,
+        string calldata question,
+        ITakesMarket.Side side,
+        uint256 amount
     ) external returns (address market);
 
     /* ──────────────────────── Views ─────────────────────────── */
