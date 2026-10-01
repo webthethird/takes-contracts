@@ -111,14 +111,17 @@ contract this project owns.
 Requires [Foundry](https://book.getfoundry.sh/) (developed on forge 1.7.1, solc 0.8.24).
 
 ```sh
-forge install foundry-rs/forge-std --no-git
-forge install OpenZeppelin/openzeppelin-contracts --no-git   # v5.6.1
+forge install foundry-rs/forge-std@v1.16.1 --no-git
+forge install OpenZeppelin/openzeppelin-contracts@v5.6.1 --no-git
 forge build
 forge test
 ```
 
-`lib/` is gitignored, so dependencies must be installed fresh after cloning.
-Import paths come from `remappings.txt`.
+`lib/` is gitignored and these aren't submodules, so dependencies must be
+installed fresh after cloning. The tags above are the versions the contracts
+were built and tested against — pin them rather than taking latest, since
+nothing else in the repo records the dependency versions. Import paths come
+from `remappings.txt`.
 
 ```sh
 forge test -vvv                    # verbose

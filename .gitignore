@@ -15,7 +15,11 @@ broadcast/
 # Generated
 docs/
 
-# Lib (managed via forge install)
-# (We ARE committing lib/ for reproducibility — typical Foundry pattern)
+# Dependencies — not committed, and not submodules either. Reinstall after
+# cloning with the `forge install` commands in the README, which pin the
+# versions this project was built and tested against (forge-std,
+# OpenZeppelin 5.6.1). Import paths come from remappings.txt.
 lib/
+
+# Build logs
 build.log
